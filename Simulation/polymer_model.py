@@ -65,7 +65,7 @@ def polymer_pbe_rhs(t, y):
 
     return dydt
 
-def run_simulation(t_end=10000, N_max=N_MAX):
+def run_simulation(t_end=2e6, N_max=N_MAX):
     y0 = np.zeros(3 + 2 * N_max)
     y0[0] = M0
     y0[1] = I0
@@ -74,8 +74,10 @@ def run_simulation(t_end=10000, N_max=N_MAX):
     t_span = (0, t_end)
     t_eval = np.linspace(0, t_end, 500)
 
-    sol = solve_ivp(polymer_pbe_rhs, t_span, y0, t_eval=t_eval, method='BDF')
+    sol = solve_ivp(polymer_pbe_rhs, t_span, y0, t_eval=t_eval,
+                    method='BDF', events=stop_at_conversion)
     return sol
+
 
 def compute_polymer_stats(y):
     P_dead = y[3 + N_MAX:]
@@ -86,6 +88,14 @@ def compute_polymer_stats(y):
     PDI = Mw / Mn if Mn > 0 else 0
     conversion = 1 - y[0] / M0
     return Mn, Mw, PDI, conversion
+
+def stop_at_conversion(t, y):
+    conversion = 1 - y[0] / M0
+    return conversion - 0.8  # Stop when conversion reaches 80%
+
+stop_at_conversion.terminal = True
+stop_at_conversion.direction = 1
+
 
 def plot_chain_length_distribution(y):
     P_dead = y[3 + N_MAX:]
@@ -101,7 +111,44 @@ def plot_chain_length_distribution(y):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.show()
+    plt.show(block=False)
+    plt.pause(0.1)
+
+
+def plot_chain_length_evolution(result, times=[100, 500, 1000, 5000, 10000]):
+    indices = np.arange(1, N_MAX + 1)
+    time_indices = [np.abs(result.t - t).argmin() for t in times if t <= result.t[-1]]
+
+    plt.figure(figsize=(10, 6))
+    for idx in time_indices:
+        y = result.y[:, idx]
+        P_dead = y[3 + N_MAX:]
+        plt.plot(indices, P_dead, label=f"t = {result.t[idx]:.0f} s")
+
+    plt.xlabel("Chain Length")
+    plt.ylabel("Concentration [mol/L]")
+    plt.title("Evolution of Chain Length Distribution")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show(block=False)
+    plt.pause(0.1)
+
+
+def plot_conversion_vs_time(result):
+    M_vals = result.y[0, :]
+    conversion = 1 - M_vals / M0
+
+    plt.figure(figsize=(8, 4))
+    plt.plot(result.t, conversion, linewidth=2)
+    plt.xlabel("Time [s]")
+    plt.ylabel("Conversion")
+    plt.title("Monomer Conversion Over Time")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show(block=False)
+    plt.pause(0.1)
+
 
 if __name__ == "__main__":
     result = run_simulation()
@@ -111,3 +158,7 @@ if __name__ == "__main__":
     print(f"Mn: {Mn:.1f}, Mw: {Mw:.1f}, PDI: {PDI:.2f}")
 
     plot_chain_length_distribution(final_state)
+    plot_chain_length_evolution(result, times=[100, 1000, 5000, 10000])
+    plot_conversion_vs_time(result)
+
+plt.show()
