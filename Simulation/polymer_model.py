@@ -6,11 +6,11 @@ from scipy.integrate import solve_ivp
 
 # Define the model parameters (to be adjusted externally)
 N_MAX = 200  # maximum chain length
-k_d = 1e-6   # initiator decomposition rate [1/s]
-k_i = 5e2    # initiation rate [L/mol/s]
+k_d = 1e-2   # initiator decomposition rate [1/s]
+k_i = 2e3    # initiation rate [L/mol/s]
 k_p = 2e3    # propagation rate [L/mol/s]
 k_t = 5e5    # termination rate [L/mol/s]
-k_tr = 1e1   # chain transfer to monomer [L/mol/s]
+k_tr = 0   # chain transfer to monomer [L/mol/s]
 f = 0.5      # initiator efficiency
 
 # Initial concentrations [mol/L]
@@ -65,7 +65,7 @@ def polymer_pbe_rhs(t, y):
 
     return dydt
 
-def run_simulation(t_end=2e6, N_max=N_MAX):
+def run_simulation(t_end=1e3, N_max=N_MAX):
     y0 = np.zeros(3 + 2 * N_max)
     y0[0] = M0
     y0[1] = I0
