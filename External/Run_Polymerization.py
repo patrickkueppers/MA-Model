@@ -202,14 +202,35 @@ def reac(t, Y):
 
     # kinetic paremeters
     f = 0.58  # [ADM]
-    kp = fkp(T, lambda0, wm, phip)  # [L/(mol.min)] # propagation rate constant
-    ktc = fktc(T, lambda0, phip, Mw, wm, kp, M)  # [L/(mol.min)]    # termination rate constant
-    kf = 4.66 * (1.e9) * np.exp(-76290 / (8.314 * T)) * 60  # [L/(mol.min)] # chain transfer rate constant
-    ktd = ktc * (3.956 * (1.e-4) * np.exp(4090 / (Rcte * T)))  # [L/(mol.min)]
-    kd = 6.32 * (1.e16 * np.exp(-30660 / (Rcte * T)))  # [1/min]    # initiator decomposition rate constant
-    kt = ktd + ktc
 
-    # print('kp = %f ; ktc = %f ; kf = %f ; ktd = %f ; kd = %f'%(kp, ktc, kf, ktd, kd))
+    # Fixpunktiteration für lambda0 und kt
+    kd = 6.32 * (1.e16 * np.exp(-30660 / (Rcte * T)))  # [1/min] initiator decomposition rate constant
+    kf = 4.66 * (1.e9) * np.exp(-76290 / (8.314 * T)) * 60  # [L/(mol.min)] # chain transfer rate constant
+    ki_PR = 2 * f * kd * I / (M + 1.e-20)   # [1/min] radical generation rate constant
+
+    # Initialwerte für die Iteration
+    lambda0_fp = 1.e-8
+    tol = 1e-10
+    max_iter = 20
+    for _ in range(max_iter):
+        kp_fp = fkp(T, lambda0_fp, wm, phip)
+        Mw_fp = mu2 / (mu1 + 1.e-20)
+        ktc_fp = fktc(T, lambda0_fp, phip, Mw_fp, wm, kp_fp, M)
+        ktd_fp = ktc_fp * (3.956 * (1.e-4) * np.exp(4090 / (Rcte * T)))
+        kt_fp = ktd_fp + ktc_fp
+        if ki_PR > 0:
+            lambda0_new = np.sqrt(ki_PR * M / (kt_fp + 1.e-20))
+        else:
+            lambda0_new = 1.e-20
+        if abs(lambda0_new - lambda0_fp) < tol:
+            break
+        lambda0_fp = lambda0_new
+    # Nach der Iteration: konsistente Werte verwenden
+    lambda0 = lambda0_fp
+    kp = kp_fp
+    ktc = ktc_fp
+    ktd = ktd_fp
+    kt = kt_fp
 
     # QSSA applied on R radical and lambda 0, 1 and 2
     ki_PR = 2 * f * kd * I / (M + 1.e-20)   # [1/min] radical generation rate constant
@@ -221,12 +242,6 @@ def reac(t, Y):
     lambda1 = (ki_PR * M + kp * M * lambda0 + kf * M * lambda0) / (kf * M + kt * lambda0)  # [mol/L] dlambda1
 
     lambda2 = (ki_PR * M + kp * M * (2 * lambda1 + lambda0) + kf * M * lambda0) / (kt * lambda0 + kf * M)
-    # print(lambda0,mu2,mu1, mu2/(mu1+1.e-20))
-    # os.system("PAUSE")
-    # print(ktc,ktd,kt)
-    # QSSA für höhere Momente (siehe Literatur, hier rekursiv):
-    # lambda_k+1 = (ki_PR*M + kp*M*sum_{j=0}^k binom(k,j) * lambda_j + kf*M*lambda_k) / (kt*lambda0 + kf*M)
-    # Wir nehmen an: lambda3, lambda4 analog zu lambda2
     lambda3 = (ki_PR * M + kp * M * (3 * lambda2 + 3 * lambda1 + lambda0) + kf * M * lambda2) / (kt * lambda0 + kf * M)
     lambda4 = (ki_PR * M + kp * M * (4 * lambda3 + 6 * lambda2 + 4 * lambda1 + lambda0) + kf * M * lambda3) / (kt * lambda0 + kf * M)
 
@@ -253,200 +268,217 @@ def reac(t, Y):
 # =================================== INTEGRATION  ================================= #
 # ================================================================================== #
 
-YY = np.zeros(NInputVar, dtype=float)   # Initializing the array for the integration results
-YY = ode(reac).set_integrator('dopri5') # Using the dopri5 method for integration
-YY.set_initial_value(InputVar, t0)  # Setting the initial values for the integration
-Y = np.zeros((int(Nt), len(YY.y)), dtype=float) # Array to store the results of the integration
-dt = (tf - t0) / (Nt)  # [min] integration interval
-j = 0
+if __name__ == "__main__":
+    YY = np.zeros(NInputVar, dtype=float)   # Initializing the array for the integration results
+    YY = ode(reac).set_integrator('dopri5') # Using the dopri5 method for integration
+    YY.set_initial_value(InputVar, t0)  # Setting the initial values for the integration
+    Y = np.zeros((int(Nt), len(YY.y)), dtype=float) # Array to store the results of the integration
+    dt = (tf - t0) / (Nt)  # [min] integration interval
+    j = 0
 
-# Arrays zur Speicherung der Reaktionsraten
-kp_array = np.zeros(int(Nt))
-kt_array = np.zeros(int(Nt))
+    # Arrays zur Speicherung der Reaktionsraten
+    kp_array = np.zeros(int(Nt))
+    kt_array = np.zeros(int(Nt))
+    lambda0_array = np.zeros(int(Nt))  # <-- Array für lambda0
 
-sys.stdout.write('\r' + '00%')  # Initial output for progress tracking
-sys.stdout.flush()
-
-while YY.successful() and YY.t < tf and j < Nt:
-
-    Y[j, :] = YY.y[:]
-
-    # Reaktionsraten für aktuellen Schritt berechnen und speichern
-    # Werte aus Y[j, :] extrahieren
-    V = Y[j, 0]
-    M = Y[j, 1]
-    I = Y[j, 2]
-    mu0 = Y[j, 3]
-    mu1 = Y[j, 4]
-    mu2 = Y[j, 5]
-    mu3 = Y[j, 6]
-    mu4 = Y[j, 7]
-
-    # Für kp und kt benötigen wir lambda0, Mw, wm, phip
-    rhom = 0.968 - 1.225 * (1.e-3) * (T - 273.15)   # [g/cm3] monomer density (T in oC)
-    rhom = rhom * 1000  # [g/L] monomer density
-    M0 = rhom / Mjm # [mol/L] initial monomer concentration
-    e = 0.183 + 9 * (1.e-4) * (T - 273.15)  # [ADM] volume contraction factor
-    rhop = rhom * (1 + e)   # [g/L]
-    Mw = mu2 / (mu1 + 1.e-20)   # [g/mol] average molecular weight of polymer chains
-    mm = M * V * rhom   # [g] monomer mass
-    mm0 = M0 * V0 * rhom    # [g] monomer initial mass
-    mp = mm0 - mm   # [g] polymer mass
-    wm = mm / (mm + mp) # [ADM] monomer weight fraction
-    phip = (mp / rhop) / (mp / rhop + mm / rhom)    # [ADM] polymer volume fraction
-    # lambda0 wie im reac()
-    f = 0.58    # [ADM] propagation factorv --> initiator efficiency
-    kd = 6.32 * (1.e16 * np.exp(-30660 / (Rcte * T)))   # [1/min] initiator decomposition rate constant
-    ki_PR = 2 * f * kd * I / (M + 1.e-20)   # [1/min] radical generation rate constant
-    ktc = 0  # Platzhalter, wird in fktc berechnet
-    kf = 4.66 * (1.e9) * np.exp(-76290 / (8.314 * T)) * 60  # [L/(mol.min)] chain transfer rate constant
-    lambda0 = np.sqrt(ki_PR * M / (1.0)) if ki_PR > 0 else 1.e-20  # Platzhalter für kt
-    kp = fkp(T, lambda0, wm, phip)
-    # Für kt brauchen wir Mw, kp, M
-    kt = fktc(T, lambda0, phip, Mw, wm, kp, M)
-    kp_array[j] = kp
-    kt_array[j] = kt
-
-    j = j + 1
-
-    if (YY.t > 10000):
-        os.system("PAUSE")
-
-    ctrl = int(YY.t / tf * 100)
-    sys.stdout.write('\r' + str(ctrl) + '%')
+    sys.stdout.write('\r' + '00%')  # Initial output for progress tracking
     sys.stdout.flush()
 
-    YY.integrate(YY.t + dt)
+    while YY.successful() and YY.t < tf and j < Nt:
 
-sys.stdout.write('\r' + '100%')
-print('\tFim integracao, t = ' + str(YY.t))
+        Y[j, :] = YY.y[:]
 
-# ================================================================================== #
-# ==================================== RESULTS ===================================== #
-# ================================================================================== #
+        # Reaktionsraten für aktuellen Schritt berechnen und speichern
+        # Werte aus Y[j, :] extrahieren
+        V = Y[j, 0]
+        M = Y[j, 1]
+        I = Y[j, 2]
+        mu0 = Y[j, 3]
+        mu1 = Y[j, 4]
+        mu2 = Y[j, 5]
+        mu3 = Y[j, 6]
+        mu4 = Y[j, 7]
 
-Vt = Y[:, 0]
-Mt = Y[:, 1]
-I = Y[:, 2]
-Mu0 = Y[:, 3]
-Mu1 = Y[:, 4]
-Mu2 = Y[:, 5]
-Mu3 = Y[:, 6]
-Mu4 = Y[:, 7]
+        # Für kp und kt benötigen wir lambda0, Mw, wm, phip
+        rhom = 0.968 - 1.225 * (1.e-3) * (T - 273.15)   # [g/cm3] monomer density (T in oC)
+        rhom = rhom * 1000  # [g/L] monomer density
+        M0 = rhom / Mjm # [mol/L] initial monomer concentration
+        e = 0.183 + 9 * (1.e-4) * (T - 273.15)  # [ADM] volume contraction factor
+        rhop = rhom * (1 + e)   # [g/L]
+        Mw = mu2 / (mu1 + 1.e-20)   # [g/mol] average molecular weight of polymer chains
+        mm = M * V * rhom   # [g] monomer mass
+        mm0 = M0 * V0 * rhom    # [g] monomer initial mass
+        mp = mm0 - mm   # [g] polymer mass
+        wm = mm / (mm + mp) # [ADM] monomer weight fraction
+        phip = (mp / rhop) / (mp / rhop + mm / rhom)    # [ADM] polymer volume fraction
+        # lambda0 wie im reac()
+        f = 0.58    # [ADM] propagation factorv --> initiator efficiency
+        kd = 6.32 * (1.e16 * np.exp(-30660 / (Rcte * T)))   # [1/min] initiator decomposition rate constant
+        ki_PR = 2 * f * kd * I / (M + 1.e-20)   # [1/min] radical generation rate constant
+        ktc = 0  # Platzhalter, wird in fktc berechnet
+        kf = 4.66 * (1.e9) * np.exp(-76290 / (8.314 * T)) * 60  # [L/(mol.min)] chain transfer rate constant
+        lambda0 = np.sqrt(ki_PR * M / (1.0)) if ki_PR > 0 else 1.e-20  # Platzhalter für kt
+        kp = fkp(T, lambda0, wm, phip)
+        # Für kt brauchen wir Mw, kp, M
+        kt = fktc(T, lambda0, phip, Mw, wm, kp, M)
+        kp_array[j] = kp
+        kt_array[j] = kt
 
-# PDI/X
-X = np.zeros(Nt)
-PDI = np.zeros(Nt)
-Mn = np.zeros(Nt)
-Mw = np.zeros(Nt)
-for i in range(0, Nt):
-    X[i] = (M0 * V0 - Mt[i] * Vt[i]) / (M0 * V0)
-    Mn[i] = Mjm * Mu1[i] / (Mu0[i] + 1.e-20)
-    Mw[i] = Mjm * Mu2[i] / (Mu1[i] + 1.e-20)
-    PDI[i] = Mw[i] / (Mn[i] + 1.e-20)
+        # Berechnung von lambda0 für Plot
+        ki_PR = 2 * f * kd * I / (M + 1.e-20)
+        lambda0_val = np.sqrt(ki_PR * M / (kt + 1.e-20)) if ki_PR > 0 else 1.e-20
+        lambda0_array[j] = lambda0_val
 
-# ================================================================================== #
-# ==================================== GRAPHS ====================================== #
-# ================================================================================== #
-if 1==2:
-    plotgraphs(tArray, X, PDI, Mn, Mw)
-print("Mn:", Mn[-1], "Mw:", Mw[-1], "PDI:", PDI[-1])
-# ================================================================================== #
-# =========== KETTENLÄNGENVERTEILUNG via MAXIMUM ENTROPY mit n Momenten ============ #
-# ================================================================================== #
-def maxent_chain_length_dist(mus, Nmax=None):
-    """
-    Approximiert die Kettenlängenverteilung p_n (n=1...Nmax) aus den Momenten mus[0], mus[1], ..., mus[k]
-    mittels Maximum Entropy Ansatz.
-    mus: Liste der Momente [mu0, mu1, mu2, ...]
-    """
-    order = len(mus) - 1
-    mean_n = mus[1] / (mus[0] + 1e-20)
-    if Nmax is None:
-        Nmax = int(5 * mean_n)
-    n = np.arange(1, Nmax + 1)
+        j = j + 1
 
-    def get_pn(lambdas):
-        expo = lambdas[0]
-        for i in range(1, order + 1):
-            expo = expo + lambdas[i] * n**i
-        expo -= np.max(expo)
-        pn = np.exp(expo)
-        pn /= pn.sum()
-        # Numerische Untergrenze setzen
-        pn = np.clip(pn, 1e-30, None)
-        pn /= pn.sum()
-        return pn
+        if (YY.t > 10000):
+            os.system("PAUSE")
 
-    def objective(lambdas):
-        pn = get_pn(lambdas)
-        return np.sum(pn * np.log(pn + 1e-20))
+        ctrl = int(YY.t / tf * 100)
+        sys.stdout.write('\r' + str(ctrl) + '%')
+        sys.stdout.flush()
 
-    # Nebenbedingungen: Momente müssen passen
-    def make_constraint(i):
-        def constraint(lambdas):
+        YY.integrate(YY.t + dt)
+
+    sys.stdout.write('\r' + '100%')
+    print('\tFim integracao, t = ' + str(YY.t))
+
+    # ================================================================================== #
+    # ==================================== RESULTS ===================================== #
+    # ================================================================================== #
+
+    Vt = Y[:, 0]
+    Mt = Y[:, 1]
+    I = Y[:, 2]
+    Mu0 = Y[:, 3]
+    Mu1 = Y[:, 4]
+    Mu2 = Y[:, 5]
+    Mu3 = Y[:, 6]
+    Mu4 = Y[:, 7]
+
+    # PDI/X
+    X = np.zeros(Nt)
+    PDI = np.zeros(Nt)
+    Mn = np.zeros(Nt)
+    Mw = np.zeros(Nt)
+    for i in range(0, Nt):
+        X[i] = (M0 * V0 - Mt[i] * Vt[i]) / (M0 * V0)
+        Mn[i] = Mjm * Mu1[i] / (Mu0[i] + 1.e-20)
+        Mw[i] = Mjm * Mu2[i] / (Mu1[i] + 1.e-20)
+        PDI[i] = Mw[i] / (Mn[i] + 1.e-20)
+
+    # ================================================================================== #
+    # ==================================== GRAPHS ====================================== #
+    # ================================================================================== #
+    if 1==2:
+        plotgraphs(tArray, X, PDI, Mn, Mw)
+    print("Mn:", Mn[-1], "Mw:", Mw[-1], "PDI:", PDI[-1])
+    # ================================================================================== #
+    # =========== KETTENLÄNGENVERTEILUNG via MAXIMUM ENTROPY mit n Momenten ============ #
+    # ================================================================================== #
+    def maxent_chain_length_dist(mus, Nmax=None):
+        """
+        Approximiert die Kettenlängenverteilung p_n (n=1...Nmax) aus den Momenten mus[0], mus[1], ..., mus[k]
+        mittels Maximum Entropy Ansatz.
+        mus: Liste der Momente [mu0, mu1, mu2, ...]
+        """
+        order = len(mus) - 1
+        mean_n = mus[1] / (mus[0] + 1e-20)
+        if Nmax is None:
+            Nmax = int(5 * mean_n)
+        n = np.arange(1, Nmax + 1)
+
+        def get_pn(lambdas):
+            expo = lambdas[0]
+            for i in range(1, order + 1):
+                expo = expo + lambdas[i] * n**i
+            expo -= np.max(expo)
+            pn = np.exp(expo)
+            pn /= pn.sum()
+            # Numerische Untergrenze setzen
+            pn = np.clip(pn, 1e-30, None)
+            pn /= pn.sum()
+            return pn
+
+        def objective(lambdas):
             pn = get_pn(lambdas)
-            return (pn * n**i).sum() - mus[i] / (mus[0] + 1e-20)
-        return constraint
+            return np.sum(pn * np.log(pn + 1e-20))
 
-    cons = [{'type': 'eq', 'fun': make_constraint(i)} for i in range(order + 1)]
+        # Nebenbedingungen: Momente müssen passen
+        def make_constraint(i):
+            def constraint(lambdas):
+                pn = get_pn(lambdas)
+                return (pn * n**i).sum() - mus[i] / (mus[0] + 1e-20)
+            return constraint
 
-    # Startwerte: zufällig im Bereich [-1, 0]
-    rng = np.random.default_rng(42)
-    x0 = rng.uniform(-1, 0, order + 1)
-    if order >= 1:
-        x0[1] = -1.0 / (mean_n + 1e-20)
+        cons = [{'type': 'eq', 'fun': make_constraint(i)} for i in range(order + 1)]
 
-    res = minimize(objective, x0, constraints=cons, method='SLSQP', options={'ftol':1e-10, 'maxiter':5000})
+        # Startwerte: zufällig im Bereich [-1, 0]
+        rng = np.random.default_rng(42)
+        x0 = rng.uniform(-1, 0, order + 1)
+        if order >= 1:
+            x0[1] = -1.0 / (mean_n + 1e-20)
 
-    if not res.success:
-        print("Maximum Entropy Optimierung nicht konvergiert:", res.message)
-        # Fallback: Exponentialverteilung mit Mittelwert
-        l1 = -1.0 / (mean_n + 1e-20)
-        pn = np.exp(l1 * n)
-        pn /= pn.sum()
-        pn = np.clip(pn, 1e-30, None)
-        pn /= pn.sum()
+        res = minimize(objective, x0, constraints=cons, method='SLSQP', options={'ftol':1e-10, 'maxiter':5000})
+
+        if not res.success:
+            print("Maximum Entropy Optimierung nicht konvergiert:", res.message)
+            # Fallback: Exponentialverteilung mit Mittelwert
+            l1 = -1.0 / (mean_n + 1e-20)
+            pn = np.exp(l1 * n)
+            pn /= pn.sum()
+            pn = np.clip(pn, 1e-30, None)
+            pn /= pn.sum()
+            pn_abs = pn * mus[0]
+            return n, pn_abs
+
+        pn = get_pn(res.x)
         pn_abs = pn * mus[0]
         return n, pn_abs
 
-    pn = get_pn(res.x)
-    pn_abs = pn * mus[0]
-    return n, pn_abs
+    # Beispiel: Kettenlängenverteilung am Ende der Reaktion plotten (bis zu 5 Momente)
+    mus = [Mu0[-1], Mu1[-1], Mu2[-1], Mu3[-1], Mu4[-1]]
+    n, pn = maxent_chain_length_dist(mus, Nmax=3*int(Mu1[-1]/(Mu0[-1]+1e-20)))
 
-# Beispiel: Kettenlängenverteilung am Ende der Reaktion plotten (bis zu 5 Momente)
-mus = [Mu0[-1], Mu1[-1], Mu2[-1], Mu3[-1], Mu4[-1]]
-n, pn = maxent_chain_length_dist(mus, Nmax=3*int(Mu1[-1]/(Mu0[-1]+1e-20)))
+    plt.figure()
+    plt.bar(n, pn, width=1.0)
+    plt.xlabel("Kettenlänge n")
+    plt.ylabel("Anzahl Ketten (MaxEnt, 5 Momente)")
+    plt.title("Kettenlängenverteilung (Maximum Entropy, t = %.1f min)" % tArray[-1])
+    if np.any(pn > 0):
+        plt.yscale("log")
+    else:
+        print("Warnung: Keine positiven Werte für log-Plot.")
+    plt.tight_layout()
+    plt.show()
 
-plt.figure()
-plt.bar(n, pn, width=1.0)
-plt.xlabel("Kettenlänge n")
-plt.ylabel("Anzahl Ketten (MaxEnt, 5 Momente)")
-plt.title("Kettenlängenverteilung (Maximum Entropy, t = %.1f min)" % tArray[-1])
-if np.any(pn > 0):
+    # Plot der Reaktionsraten
+    plt.figure()
+    plt.plot(tArray, kp_array, label="Wachstumsrate $k_p$")
+    plt.xlabel("Zeit [min]")
+    plt.ylabel("Reaktionsrate [L/(mol��min)]")
+    plt.title("Veränderliche Reaktionsraten über die Zeit")
+    plt.legend()
+    plt.tight_layout()
     plt.yscale("log")
-else:
-    print("Warnung: Keine positiven Werte für log-Plot.")
-plt.tight_layout()
-plt.show()
+    plt.show()
 
-# Plot der Reaktionsraten
-plt.figure()
-plt.plot(tArray, kp_array, label="Wachstumsrate $k_p$")
-plt.xlabel("Zeit [min]")
-plt.ylabel("Reaktionsrate [L/(mol·min)]")
-plt.title("Veränderliche Reaktionsraten über die Zeit")
-plt.legend()
-plt.tight_layout()
-plt.yscale("log")
-plt.show()
+    plt.figure()
+    plt.plot(tArray, kt_array, label="Terminierungsrate $k_t$")
+    plt.xlabel("Zeit [min]")
+    plt.ylabel("Reaktionsrate [L/(mol·min)]")
+    plt.title("Veränderliche Reaktionsraten über die Zeit")
+    plt.legend()
+    plt.tight_layout()
+    plt.yscale("log")
+    plt.show()
 
-plt.figure()
-plt.plot(tArray, kt_array, label="Terminierungsrate $k_t$")
-plt.xlabel("Zeit [min]")
-plt.ylabel("Reaktionsrate [L/(mol·min)]")
-plt.title("Veränderliche Reaktionsraten über die Zeit")
-plt.legend()
-plt.tight_layout()
-plt.yscale("log")
-plt.show()
+    # Plot für lambda0 über die Zeit
+    plt.figure()
+    plt.plot(tArray, lambda0_array, label="lambda0")
+    plt.xlabel("Zeit [min]")
+    plt.ylabel(r"$\lambda_0$ [mol/L]")
+    plt.title(r"Verlauf von $\lambda_0$ über die Zeit")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
