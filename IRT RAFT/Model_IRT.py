@@ -1,7 +1,8 @@
 import numpy as np
 from scipy.optimize import fsolve
+from scipy.integrate import solve_ivp
 import matplotlib
-matplotlib.use('TkAgg')  # Use TkAgg backend for interactive plotting
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import time as t
 
@@ -21,152 +22,137 @@ M0  = 5.0          # Monomer [mol/L]
 CTA0 = 1e-2        # RAFT-Agent (alle TPs) [mol/L]
 
 # === Simulationseinstellungen ===
-dt = 0.01           # Zeitschritt [s]
-t_max = 10        # max. Zeit [s]
+dt = 0.1          # Zeitschritt [s]
+t_max = 5000        # max. Zeit [s]
 n_steps = int(t_max / dt)
-r_max = 300        # maximale Kettenlänge
+r_max = 30        # maximale Kettenlänge
 
-# === Zustandsvariablen ===
+# === Initialisierung ===
 I = I0
 M = M0
+Y0 = 5e-8  # Anfangswert für Y0 nicht 0, um Division durch Null zu vermeiden
+YT0 = 0
 QT_0 = 0.0
 Q_0 = 0.0
-TP_r = np.zeros(r_max + 1)  # Dormante Ketten TPr
+TP_r = np.zeros(r_max + 1)
 TP_r[0] = CTA0
 
-Y0 = 0.0  # initialer Guess
-YT_0 = 0.0
-
-# Arrays zur Speicherung der Konzentrationen
-P_r = np.zeros(r_max + 1)             # Lebende Ketten P*
-d_r = np.zeros(r_max + 1)             # partielle Momente d(r)
-P_T_rs = np.zeros((r_max + 1, r_max + 1))  # Adduktradikale PrT*Ps
+P_r = np.zeros(r_max + 1)
+d_r = np.zeros(r_max + 1)
 
 # === Hilfsfunktionen ===
 def solve_Y0(I, QT_0):
     def eq(Y):
-        term1 = Y**3
-        term2 = ((2 * k_a * k_ct * QT_0 + k_f * (k_td + k_tc)) / (k_ct * (k_td + k_tc))) * Y**2
-        term3 = -(2 * f * k_d * I) / (k_td + k_tc) * Y
-        term4 = -k_f * 2 * f * k_d * I / (k_ct * (k_td + k_tc))
-        return term1 + term2 + term3 + term4
-
-    Y0_guess = 1e-8
-    Y0_solution = fsolve(eq, Y0_guess)[0]
-    return Y0_solution
+        return (Y**3
+                + ((2 * k_a * k_ct * QT_0 + k_f * (k_td + k_tc)) / (k_ct * (k_td + k_tc))) * Y**2
+                - (2 * f * k_d * I) / (k_td + k_tc) * Y
+                - k_f * 2 * f * k_d * I / (k_ct * (k_td + k_tc)))
+    return fsolve(eq, 1e-8)[0]
 
 def solve_YT0(Y0, I):
-    return (2 * f * k_d * I - (k_td + k_tc) * Y0**2) / (2 * k_ct * Y0)
+    return (2 * f * k_d * I - (k_td + k_tc) * Y0**2) / (2 * k_ct * Y0) if Y0 != 0 else 0.0
 
-def update_Pr(Y0, YT_0):
-    global P_r
-    P_r_old = P_r.copy()
-    for r in range(r_max + 1):
-        if r == 0:
-            numerator = 2 * f * k_d * I + 0.5 * k_f * d_r[0]
-            denom = k_p * M + k_a * QT_0 + (k_tc + k_td) * Y0 + k_ct * YT_0
-            P_r[r] = numerator / denom
-        else:
-            numerator = k_p * M * P_r_old[r - 1] + 0.5 * k_f * d_r[r]
-            denom = k_p * M + k_a * QT_0 + (k_tc + k_td) * Y0 + k_ct * YT_0
-            P_r[r] = numerator / denom
-
-def update_P_T_rs(Y0):
-    global P_T_rs, d_r
+def compute_P_T_rs(Y0, P_r, TP_r):
+    P_T_rs = np.zeros((r_max + 1, r_max + 1))
+    d_r = np.zeros(r_max + 1)
     for r in range(r_max + 1):
         d_sum = 0.0
         for s in range(r_max + 1):
-            try:
-                numer = k_a * P_r[r] * TP_r[s] + k_a * P_r[s] * TP_r[r]
-                denom = k_f + k_ct * Y0
-                if not np.isfinite(numer) or not np.isfinite(denom):
-                    print(f"[Overflow Warning] r={r}, s={s}, P_r[r]={P_r[r]:.2e}, TP_r[s]={TP_r[s]:.2e}, P_r[s]={P_r[s]:.2e}, TP_r[r]={TP_r[r]:.2e}, numer={numer:.2e}, denom={denom:.2e}")
-                P_T_rs[r, s] = numer / denom
-                d_sum += P_T_rs[r, s]
-            except FloatingPointError as e:
-                print(f"FloatingPointError at r={r}, s={s}: {e}")
+            numer = k_a * P_r[r] * TP_r[s] + k_a * P_r[s] * TP_r[r]
+            denom = k_f + k_ct * Y0
+            P_T_rs[r, s] = numer / denom if denom != 0 else 0.0
+            d_sum += P_T_rs[r, s]
         d_r[r] = d_sum
+    return d_r
 
-    if np.any(np.isnan(d_r)) or np.any(np.isinf(d_r)):
-        print("[NaN in d_r] after update_P_T_rs")
-        for r in range(r_max + 1):
-            if np.isnan(d_r[r]) or np.isinf(d_r[r]):
-                print(f"r={r}, d_r={d_r[r]:.2e}")
+def rhs(t, y):
+    # Entpacken des Zustandsvektors
+    I = y[0]
+    M = y[1]
+    QT_0 = y[2]
+    Q_0 = y[3]
+    P_r = y[4:4 + r_max + 1]
+    TP_r = y[4 + r_max + 1:4 + 2 * (r_max + 1)]
 
-def update_TP_r():
-    global TP_r
-    dTP = k_f * d_r - k_a * Y0 * TP_r
+    # Algebraische Variablen bestimmen
+    Y0 = solve_Y0(I, QT_0)
+    YT0 = solve_YT0(Y0, I)
+    d_r = compute_P_T_rs(Y0, P_r, TP_r)
 
-    if np.any(np.isnan(dTP)) or np.any(np.isinf(dTP)):
-        print("[NaN in dTP] Detected at TP_r update:")
-        for r in range(r_max + 1):
-            if np.isnan(dTP[r]) or np.isinf(dTP[r]):
-                print(f"r={r}, d_r={d_r[r]:.2e}, TP_r={TP_r[r]:.2e}, Y0={Y0:.2e}, dTP={dTP[r]:.2e}")
+    # Ableitungen berechnen
+    dI = -k_d * I
+    dM = -k_p * M * np.sum(P_r)
+    dQT_0 = k_f * YT0 - k_a * Y0 * QT_0
+    dQ_0 = (k_tc + k_td) * Y0**2 + k_ct * Y0 * YT0
 
-    TP_r[:] += dt * dTP
+    dP_r = np.zeros(r_max + 1)
+    for r in range(r_max + 1):
+        de  nom = k_p * M + k_a * QT_0 + (k_tc + k_td) * Y0 + k_ct * YT0
+        if r == 0:
+            numer = 2 * f * k_d * I + 0.5 * k_f * d_r[0]
+        else:
+            numer = k_p * M * P_r[r - 1] + 0.5 * k_f * d_r[r]
+        dP_r[r] = numer / denom - P_r[r] if denom != 0 else -P_r[r]
 
-def update_QT0():
-    global QT_0
-    dQT0 = k_f * YT_0 - k_a * Y0 * QT_0
-    QT_0 += dt * dQT0
+    dTP_r = k_f * d_r - k_a * Y0 * TP_r
 
-def update_Q0():
-    global Q_0
-    dQ0 = (k_tc + k_td) * Y0**2 + k_ct * Y0 * YT_0
-    Q_0 += dt * dQ0
+    # Rückgabe als flacher Vektor
+    return np.concatenate(([dI, dM, dQT_0, dQ_0], dP_r, dTP_r))
 
-def update_I():
-    global I
-    I -= dt * k_d * I
+# Anfangsbedingungen als Vektor
+y0 = np.zeros(4 + 2 * (r_max + 1))
+y0[0] = I0
+y0[1] = M0
+y0[2] = CTA0
+y0[3] = 0.0
+y0[4 + r_max + 1] = CTA0  # TP_r[0] = CTA0
 
-def update_M():
-    global M
-    M -= dt * k_p * M * np.sum(P_r)
-
-# === Hauptzeitschleife ===
-time_vals = []
-DPn_list = []
-PD_list = []
+t_span = (0, t_max)
+t_eval = np.linspace(0, t_max, int(t_max / dt))
 
 t_start = t.time()
+sol = solve_ivp(rhs, t_span, y0, method='BDF', t_eval=t_eval, vectorized=False, rtol=1e-6, atol=1e-9)
+t_end = t.time()
+print(f"Simulation completed in {t_end - t_start:.2f} seconds.")
 
-for step in range(n_steps):
-    if step % 10 == 0:
-        print(f"Step {step}/{n_steps}")
+# Extrahiere Größen für Plot
+M_list = sol.y[1, :]
+P_r_mat = sol.y[4:4 + r_max + 1, :]
+TP_r_mat = sol.y[4 + r_max + 1:4 + 2 * (r_max + 1), :]
+P_r_sum_list = np.sum(P_r_mat, axis=0)
+TP_r_sum_list = np.sum(TP_r_mat, axis=0)
 
-    Y0 = solve_Y0(I, QT_0)
-    YT_0 = solve_YT0(Y0, I)
-
-    update_P_T_rs(Y0)
-    update_Pr(Y0, YT_0)
-    update_TP_r()
-    update_QT0()
-    update_Q0()
-    update_I()
-    update_M()
-
-    if np.any(np.isnan(P_r)) or np.any(np.isnan(TP_r)):
-        print(f"[NaN DETECTED] at step {step}, breaking simulation.")
-        break
-
-    time_vals.append(step * dt)
+# DPn und PD berechnen
+DPn_list = []
+PD_list = []
+for i in range(P_r_mat.shape[1]):
+    P_r = P_r_mat[:, i]
     Y1 = np.sum([r * P_r[r] for r in range(r_max + 1)])
     Y2 = np.sum([r**2 * P_r[r] for r in range(r_max + 1)])
-    DPn = Y1 / np.sum(P_r)
+    DPn = Y1 / np.sum(P_r) if np.sum(P_r) > 0 else 0
     DPw = Y2 / Y1 if Y1 > 0 else 0
     PD = DPw / DPn if DPn > 0 else 0
     DPn_list.append(DPn)
     PD_list.append(PD)
 
-t_end = t.time()
-print(f"Simulation completed in {t_end - t_start:.2f} seconds.")
-
 # === Plotten ===
-plt.plot(time_vals, DPn_list, label='DPn')
-plt.plot(time_vals, PD_list, label='PD')
+plt.plot(sol.t, DPn_list, label='DPn')
+plt.plot(sol.t, PD_list, label='PD')
 plt.xlabel('Time [s]')
 plt.ylabel('Values')
 plt.legend()
 plt.title('Number Average Degree of Polymerization (DPn) and Polydispersity Index (PD)')
+plt.grid()
+plt.show()
+
+plt.figure()
+plt.plot(sol.t, M_list, label='[M] (Monomer)')
+plt.plot(sol.t, P_r_sum_list, label='Σ[P_r] (aktive Ketten)')
+plt.plot(sol.t, TP_r_sum_list, label='Σ[TP_r] (RAFT-Agent)')
+plt.xlabel('Time [s]')
+plt.ylabel('Concentration [mol/L]')
+plt.yscale('log')
+plt.legend()
+plt.title('Verlauf der Spezies über die Zeit')
 plt.grid()
 plt.show()
